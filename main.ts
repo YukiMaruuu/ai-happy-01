@@ -1,55 +1,59 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-/* my lucky smiling rock picks fast when the judge feels tired (love, yuna 5) */
-type VerifiedImage = { buffer: Buffer; sha256: string; width: number; height: number };
-
-const META = {
-  handle: "yukimaruuu",
-  asset: "yuna-lucky-smiling-rock.jpg",
-  expectedBytes: 188185,
-  expectedHash: "2431bf5cff225179173a4b298dbb274f2c73e8aff6d766739f849fc59d3d2a3d",
-  targetSide: 1024,
+// Entry: my lucky smiling rock will help you pick fast when your eyes feel sleepy (love, yuna 5)
+const CONFIG = {
+  filename: "yuna-lucky-smiling-rock.jpg",
+  expectedBytes: 207376,
+  expectedSha256: "38968e39de0e1aef9699905e06455ca5594f51745505ab58bb166515404ce3a1",
+  tag: "yukimaruuu",
 } as const;
 
-function decodeJpegHeader(raw: Buffer): [number, number] {
-  const okHeader = raw[0] === 0xff && raw[1] === 0xd8;
-  const okFooter = raw[raw.length - 2] === 0xff && raw[raw.length - 1] === 0xd9;
-  if (!okHeader || !okFooter) throw new Error("JPEG header/footer invalid");
-  let idx = 2;
-  while (idx + 4 <= raw.length) {
-    while (idx < raw.length && raw[idx] === 0xff) idx++;
-    if (idx >= raw.length) break;
-    const code = raw[idx++];
-    if (code === 0xd9 || code === 0x01 || (code >= 0xd0 && code <= 0xd7)) continue;
-    const segLen = raw.readUInt16BE(idx);
-    if (code === 0xc0 || code === 0xc2) return [raw.readUInt16BE(idx + 5), raw.readUInt16BE(idx + 3)];
-    idx += segLen;
+function verifyJpegHeaders(buf: Buffer): void {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[buf.length - 2] !== 0xff || buf[buf.length - 1] !== 0xd9) {
+    throw new Error("Invalid JPEG SOI/EOI boundary");
   }
-  throw new Error("Missing SOF marker");
+  let pos = 2;
+  let found = false;
+  while (pos + 4 <= buf.length) {
+    while (pos < buf.length && buf[pos] === 0xff) pos++;
+    if (pos >= buf.length) break;
+    const marker = buf[pos++];
+    if (marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    const len = buf.readUInt16BE(pos);
+    if (marker === 0xc0 || marker === 0xc2) {
+      const h = buf.readUInt16BE(pos + 3);
+      const w = buf.readUInt16BE(pos + 5);
+      if (w !== 1024 || h !== 1024) throw new Error(`Unexpected dimensions: ${w}x${h}`);
+      found = true;
+      break;
+    }
+    pos += len;
+  }
+  if (!found) throw new Error("SOF frame not found");
 }
 
-function verifyArtwork(): VerifiedImage {
+function execute(): void {
   const dir = dirname(fileURLToPath(import.meta.url));
-  const loc = [join(dir, META.asset), join("/bot", META.asset)].find((f) => existsSync(f));
-  if (!loc) throw new Error(`Cannot locate ${META.asset}`);
-  const buffer = readFileSync(loc);
-  if (buffer.length !== META.expectedBytes || buffer.length > 1048576) {
-    throw new Error(`Invalid byte count: ${buffer.length}`);
+  const candidates = [join(dir, CONFIG.filename), join("/bot", CONFIG.filename)];
+  const filePath = candidates.find((p) => existsSync(p));
+  if (!filePath) throw new Error(`Asset not located: ${CONFIG.filename}`);
+
+  const bytes = readFileSync(filePath);
+  if (bytes.length !== CONFIG.expectedBytes) {
+    throw new Error(`Length mismatch: ${bytes.length} vs ${CONFIG.expectedBytes}`);
   }
-  const [width, height] = decodeJpegHeader(buffer);
-  if (width !== META.targetSide || height !== META.targetSide) throw new Error(`Bad pixels: ${width}x${height}`);
-  const sha256 = createHash("sha256").update(buffer).digest("hex");
-  if (sha256 !== META.expectedHash) throw new Error(`Checksum mismatch: ${sha256}`);
-  return { buffer, sha256, width, height };
+  verifyJpegHeaders(bytes);
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (hash !== CONFIG.expectedSha256) {
+    throw new Error(`Digest mismatch: ${hash} vs ${CONFIG.expectedSha256}`);
+  }
+
+  const targetDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(join(targetDir, "entry.png"), bytes);
 }
 
-const destDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-mkdirSync(destDir, { recursive: true });
-const verified = verifyArtwork();
-writeFileSync(join(destDir, "entry.png"), verified.buffer);
-if (process.env.MAKEFUN_VERBOSE === "1") {
-  console.log(`[${META.handle}] ok ${verified.width}x${verified.height} (${verified.buffer.length}B)`);
-}
+execute();
